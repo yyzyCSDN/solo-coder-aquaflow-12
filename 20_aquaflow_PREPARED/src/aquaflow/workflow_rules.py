@@ -15,6 +15,16 @@ from .lab.scheduling import Collector, Req, assign
 from .leak.localize import Signal, rank
 from .meters.balance import Meter, balance
 from .network.isolation import Pipe, isolated
+from .network.fire_flow import (
+    FireFlowPlan,
+    FireMain,
+    FireNode,
+    MainOutage,
+    PumpState,
+    ReservoirState,
+    FirePump,
+    assure as assure_fire_flow,
+)
 from .network.pressure import Node as PressureNode, classify as classify_pressure
 from .network.topology import Revision, at as topology_at
 from .outage.impact import Customer, summarize
@@ -125,5 +135,60 @@ def evaluate(name: str, p: dict[str, Any]) -> dict[str, Any]:
         rows = [Reading(_dt(x["at"]), float(x["value"])) for x in p["readings"]]
         result = average(rows, timedelta(hours=float(p["window_hours"])), _dt(p["at"]))
         return {"decision": "report" if result is not None else "defer", "value": result, "evidence": {"reading_count": len(rows)}}
+    if name == "fire_flow_assurance":
+        plan_in = p["plan"]
+        plan = FireFlowPlan(
+            str(plan_in["plan_id"]),
+            str(plan_in["source"]),
+            str(plan_in["target"]),
+            _dt(plan_in["fire_start"]),
+            float(plan_in["duration_hours"]),
+            float(plan_in["required_flow_l_s"]),
+        )
+        nodes = [FireNode(str(x["id"]), bool(x.get("source", False))) for x in p["nodes"]]
+        mains = [FireMain(str(x["id"]), str(x["a"]), str(x["b"]), float(x["flow_l_s"]), bool(x.get("open", True))) for x in p["mains"]]
+        pumps = [
+            FirePump(str(x["id"]), float(x["flow_l_s"]), float(x.get("min_rest_hours", 0.0)), bool(x.get("healthy", True)))
+            for x in p["pumps"]
+        ]
+        pump_states = {
+            str(k): PumpState(bool(v["running"]), float(v.get("since_stop_hours", 0.0)))
+            for k, v in p["pump_states"].items()
+        }
+        reservoirs = [
+            ReservoirState(
+                str(x["id"]),
+                float(x["current_volume_l"]),
+                float(x["protected_volume_l"]),
+                float(x.get("inflow_l_s", 0.0)),
+            )
+            for x in p["reservoirs"]
+        ]
+        outages = [
+            MainOutage(str(x["main_id"]), _dt(x["starts_at"]), _dt(x["ends_at"]), bool(x.get("restored", False)))
+            for x in p["outages"]
+        ]
+        record = assure_fire_flow(
+            plan, nodes, mains, pumps, pump_states, reservoirs, outages, _dt(p["now"]),
+            p.get("topology_revision"),
+        )
+        return {
+            "decision": record.status,
+            "value": {
+                "record_id": record.record_id,
+                "primary_path": list(record.primary_path),
+                "backup_path": list(record.backup_path),
+                "available_pump_flow_l_s": record.available_pump_flow_l_s,
+                "available_fire_volume_l": record.available_fire_volume_l,
+                "findings": list(record.findings),
+                "actions": [
+                    {"action": a.action, "detail": a.detail, "confirmed": a.confirmed}
+                    for a in record.actions
+                ],
+                "snapshot_revision": record.snapshot.topology_revision,
+                "snapshot_taken_at": record.snapshot.taken_at.isoformat(),
+            },
+            "evidence": {"action_count": len(record.actions), "snapshot_mains": len(record.snapshot.mains)},
+        }
     raise ValueError("unknown workflow")
 
