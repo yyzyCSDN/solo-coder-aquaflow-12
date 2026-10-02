@@ -15,8 +15,15 @@ from .lab.scheduling import Collector, Req, assign
 from .leak.localize import Signal, rank
 from .meters.balance import Meter, balance
 from .network.isolation import Pipe, isolated
+from .network.pathing import Junction, Main
 from .network.pressure import Node as PressureNode, classify as classify_pressure
 from .network.topology import Revision, at as topology_at
+from .fireflow.assurance import (
+    FirePump,
+    Outage,
+    ProtectedReservoir,
+    assure as assure_fire_flow,
+)
 from .outage.impact import Customer, summarize
 from .pumps.schedule import Hist, Pump, choose as choose_pumps
 from .regulatory.rolling import Reading, average
@@ -31,6 +38,39 @@ def _dt(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _serialize_snapshot(record: Any) -> dict[str, Any]:
+    """Freeze the inputs used for the decision into audit-friendly data."""
+    snap = record.snapshot
+    return {
+        "captured_at": snap.captured_at.isoformat(),
+        "site_id": snap.site_id,
+        "required_flow_l_s": snap.required_flow_l_s,
+        "duration_s": snap.duration_s,
+        "starts_at": snap.starts_at.isoformat(),
+        "nodes": [n.node_id for n in snap.nodes],
+        "mains": [
+            {"id": m.main_id, "a": m.a, "b": m.b, "open": m.open,
+             "diameter_mm": m.diameter_mm, "condition": m.condition}
+            for m in snap.mains
+        ],
+        "pumps": [
+            {"id": p.id, "flow_l_s": p.flow_l_s, "available": p.available,
+             "running": p.running, "since_stop": p.since_stop, "min_rest": p.min_rest}
+            for p in snap.pumps
+        ],
+        "reservoirs": [
+            {"id": r.id, "available_volume_l": r.available_volume_l,
+             "protected_volume_l": r.protected_volume_l, "inflow_l_s": r.inflow_l_s}
+            for r in snap.reservoirs
+        ],
+        "outages": [
+            {"main_id": o.main_id,
+             "restored_at": o.restored_at.isoformat() if o.restored_at else None}
+            for o in snap.outages
+        ],
+    }
 
 
 def evaluate(name: str, p: dict[str, Any]) -> dict[str, Any]:
@@ -125,5 +165,37 @@ def evaluate(name: str, p: dict[str, Any]) -> dict[str, Any]:
         rows = [Reading(_dt(x["at"]), float(x["value"])) for x in p["readings"]]
         result = average(rows, timedelta(hours=float(p["window_hours"])), _dt(p["at"]))
         return {"decision": "report" if result is not None else "defer", "value": result, "evidence": {"reading_count": len(rows)}}
+    if name == "fire_flow_assurance":
+        site = p["site"]
+        nodes = [Junction(str(x["id"]), float(x["elevation_m"]), float(x.get("demand_l_s", 0.0)), bool(x.get("source", False)), bool(x.get("critical", False))) for x in p["nodes"]]
+        mains = [Main(str(x["id"]), str(x["a"]), str(x["b"]), float(x["length_m"]), float(x["diameter_mm"]), bool(x.get("open", True)), float(x.get("condition", 1.0))) for x in p["mains"]]
+        pumps = [FirePump(str(x["id"]), float(x["flow_l_s"]), bool(x.get("available", True)), bool(x.get("running", False)), float(x.get("since_stop", 0.0)), float(x.get("min_rest", 0.0))) for x in p["pumps"]]
+        reservoirs = [ProtectedReservoir(str(x["id"]), float(x["available_volume_l"]), float(x["protected_volume_l"]), float(x.get("inflow_l_s", 0.0))) for x in p["reservoirs"]]
+        outages = [Outage(str(x["main_id"]), _dt(x["restored_at"]) if x.get("restored_at") else None) for x in p["outages"]]
+        now, starts_at = _dt(p["now"]), _dt(p["starts_at"])
+        record = assure_fire_flow(
+            str(site) if isinstance(site, str) else str(site["id"]),
+            float(p["required_flow_l_s"]),
+            float(p["duration_s"]),
+            starts_at,
+            nodes,
+            mains,
+            pumps,
+            reservoirs,
+            outages,
+            now,
+            record_id=str(p.get("record_id", "")),
+        )
+        return {
+            "decision": {"passed": "ready", "conditional": "remediate", "failed": "deny"}[record.outcome],
+            "value": record.outcome,
+            "evidence": {
+                "reasons": list(record.reasons),
+                "actions": [{"code": a.code, "ref": a.ref, "detail": a.detail} for a in record.actions],
+                "ready": record.ready,
+                "metrics": record.metrics,
+                "snapshot": _serialize_snapshot(record),
+            },
+        }
     raise ValueError("unknown workflow")
 

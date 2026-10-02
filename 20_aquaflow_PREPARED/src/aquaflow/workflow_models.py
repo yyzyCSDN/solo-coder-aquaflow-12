@@ -39,6 +39,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "incident_escalation": ("incident", "rules", "now"),
     "topology_revision": ("sequence", "revisions"),
     "regulatory_window": ("readings", "window_hours", "at"),
+    "fire_flow_assurance": ("site", "required_flow_l_s", "duration_s", "now", "starts_at", "nodes", "mains", "pumps", "reservoirs", "outages"),
 }
 
 
